@@ -1,0 +1,30 @@
+[
+    {
+        "callsign": "KDO89",
+        "frequency": 162550000,
+        "latitude": 38.627,
+        "longitude": -90.199,
+        "Note": "St. Louis, MO"
+    },
+    {
+        "callsign": "WXL25",
+        "frequency": 162550000,
+        "latitude": 38.834,
+        "longitude": -90.431,
+        "Note": "St. Charles, MO"
+    },
+    {
+        "callsign": "KXI70",
+        "frequency": 162450000,
+        "latitude": 38.351,
+        "longitude": -89.131,
+        "Note": "Centralia, IL"
+    },
+    {
+        "callsign": "KZZ55",
+        "frequency": 162425000,
+        "latitude": 38.673,
+        "longitude": -88.932,
+        "Note": "Salem, IL"
+    }
+]
