@@ -12,6 +12,8 @@ const squelchSlider = document.getElementById('squelchSlider');
 const squelchValue = document.getElementById('squelchValue');
 const radiusSlider = document.getElementById('radiusSlider');
 const radiusValue = document.getElementById('radiusValue');
+const gainSlider = document.getElementById('gainSlider');
+const gainValue = document.getElementById('gainValue');
 const wsStatus = document.getElementById('ws-status');
 const wsText = document.getElementById('ws-text');
 const repeaterList = document.getElementById('repeaterList');
@@ -93,7 +95,8 @@ function triggerSearch() {
         radiod_host: hostInput.value,
         location: locationInput.value,
         squelch: parseFloat(squelchSlider.value),
-        radius: parseFloat(radiusSlider.value)
+        radius: parseFloat(radiusSlider.value),
+        gain: parseFloat(gainSlider.value)
     }));
 }
 
@@ -122,6 +125,7 @@ function handleSearchResults(data) {
         marker.bindPopup(`
             <div class="dark-popup">
                 <h4>${rep.Callsign || 'NWS'}</h4>
+                <p><strong>Channel:</strong> ${rep.Channel || 'Unknown'}</p>
                 <p><strong>Freq:</strong> ${rep.Downlink || rep.freq} MHz</p>
                 <p>${rep.Note || ''}</p>
                 <button onclick="listenToRepeater(${freqHz}, '${rep.Callsign}', '${rep.Downlink}')" style="margin-top:10px; padding: 5px; font-size: 0.8rem;">Listen Live</button>
@@ -135,7 +139,7 @@ function handleSearchResults(data) {
         li.id = `rep-${freqHz}`;
         li.innerHTML = `
             <div class="rep-header">
-                <span class="rep-call">${rep.Callsign || 'NWS'}</span>
+                <span class="rep-call">${rep.Callsign || 'NWS'} (${rep.Channel || 'Unknown'})</span>
                 <span class="rep-freq">${rep.Downlink || rep.freq}</span>
             </div>
             <div class="rep-details">
@@ -229,14 +233,20 @@ function listenToRepeater(freqHz, callsign, freq) {
             console.log(`Received 100 audio frames. Buffer state: ${audioCtx.state}`);
         }
 
-        // Data is now Int16Array from backend (Opus decoded or S16LE)
-        const int16 = new Int16Array(event.data);
-        if (int16.length === 0) return;
+        // Data is sent as np.float32 array bytes from backend Opus decoder
+        const floats = new Float32Array(event.data);
+        if (floats.length === 0) {
+            console.log("Empty audio frame");
+            return;
+        }
 
-        // Convert to Float32Array normalized for WebAudio [-1.0, 1.0]
-        const floats = new Float32Array(int16.length);
-        for (let i = 0; i < int16.length; i++) {
-            floats[i] = int16[i] / 32768.0;
+        let rms = 0;
+        for (let i = 0; i < floats.length; i++) {
+            rms += floats[i] * floats[i];
+        }
+        rms = Math.sqrt(rms / floats.length);
+        if (frameCount % 100 === 0) {
+            console.log(`Audio RMS: ${rms.toFixed(4)}`);
         }
 
         // All streams are now aligned to 12000Hz (Opus and S16LE)
@@ -316,10 +326,16 @@ squelchSlider.addEventListener('change', (e) => {
     }
 });
 
-radiusSlider.addEventListener('input', (e) => {
-    radiusValue.textContent = e.target.value;
-});
 radiusSlider.addEventListener('change', (e) => {
+    if (wsControl.readyState === WebSocket.OPEN) {
+        triggerSearch();
+    }
+});
+
+gainSlider.addEventListener('input', (e) => {
+    gainValue.textContent = e.target.value;
+});
+gainSlider.addEventListener('change', (e) => {
     if (wsControl.readyState === WebSocket.OPEN) {
         triggerSearch();
     }

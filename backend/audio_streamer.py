@@ -89,6 +89,24 @@ class OpusRadiodStream(RadiodStream):
             logger.debug(f"Opus decode error: {e}")
             return None
 
+class S16LERadiodStream(RadiodStream):
+    """
+    Subclass of RadiodStream that correctly decodes S16LE (16-bit signed integer)
+    payloads into float32 samples normalized to [-1.0, 1.0].
+    
+    The base RadiodStream._parse_samples interprets all audio payloads as float32,
+    but when radiod outputs S16LE encoding, the payload contains 16-bit integers.
+    Reading int16 bytes as float32 produces garbage/NaN values.
+    """
+    def _parse_samples(self, payload: bytes) -> Optional[np.ndarray]:
+        try:
+            int16_samples = np.frombuffer(payload, dtype=np.int16)
+            return (int16_samples.astype(np.float32) / 32768.0)
+        except Exception as e:
+            logger.error(f"S16LE parse error: {e}")
+            return None
+
+
 class RobustManagedStream:
     """
     Subclass of ManagedStream logic that supports explicit encoding (S16LE).
@@ -97,10 +115,11 @@ class RobustManagedStream:
     parameter in its constructor or its internal restore loop, which causes it to 
     default to S16. This class ensures encoding is respected.
     """
-    def __init__(self, control, frequency_hz, preset='nfm', sample_rate=12000, 
-                 encoding=Encoding.S16LE, on_samples=None, deliver_interval_packets=5,
+    def __init__(self, controller, frequency_hz, preset='nfm', sample_rate=12000, 
+                 encoding=Encoding.S16LE, on_samples=None, deliver_interval_packets=1,
                  squelch_threshold=None):
-        self.control = control
+        self.controller = controller
+        self.control = controller.control
         self.frequency_hz = frequency_hz
         self.preset = preset
         self.sample_rate = sample_rate
@@ -134,66 +153,41 @@ class RobustManagedStream:
     def _ensure_connection(self):
         """Creates/finds the channel and starts the RadiodStream."""
         try:
-            from ka9q.utils import resolve_multicast_address
-            # We bypass ensure_channel because discovery is failing.
-            # We create the channel and manually construct ChannelInfo.
-            ssrc = self.control.create_channel(
+            # Use ensure_channel to off-load SSRC and multicast management
+            self.channel_info = self.control.ensure_channel(
                 frequency_hz=self.frequency_hz,
                 preset=self.preset,
                 sample_rate=self.sample_rate,
-                encoding=self.encoding
+                encoding=self.encoding,
+                gain=getattr(self.controller, 'gain_db', 21.0),
+                timeout=5.0
             )
-            
-            # Set squelch if provided
-            if self.squelch_threshold is not None:
-                try:
-                    self.control.set_squelch(ssrc, enable=True, open_snr_db=float(self.squelch_threshold))
-                    logger.info(f"RobustManagedStream: Set squelch to {self.squelch_threshold} dB for SSRC {ssrc:x}")
-                except Exception as sq_err:
-                    logger.warning(f"Failed to set squelch on channel: {sq_err}")
-            
-            # Resolve data multicast address (PCM)
-            data_mcast_addr = "239.116.109.99" # Fallback
-            try:
-                data_mcast_addr = resolve_multicast_address("airspy-generic-pcm.local")
-            except:
-                pass
 
-            # Manually construct ChannelInfo
-            self.channel_info = ChannelInfo(
-                ssrc=ssrc,
-                preset=self.preset,
-                sample_rate=self.sample_rate,
-                frequency=self.frequency_hz,
-                snr=0.0,  # Placeholder for required field
-                multicast_address=data_mcast_addr,
-                port=5004,
-                encoding=self.encoding
-            )
-            
             if self.channel_info:
+                # Set squelch if provided
+                if self.squelch_threshold is not None:
+                    try:
+                        self.control.set_squelch(self.channel_info.ssrc, enable=True, open_snr_db=float(self.squelch_threshold))
+                        logger.info(f"RobustManagedStream: Set squelch to {self.squelch_threshold} dB for SSRC {self.channel_info.ssrc:x}")
+                    except Exception as sq_err:
+                        logger.warning(f"Failed to set squelch on channel: {sq_err}")
+
                 if self.stream:
                     self.stream.stop()
                 
-                if self.encoding == Encoding.OPUS:
-                    # Use a copy of channel_info with 12000Hz for the resequencer
-                    opus_info = dataclasses.replace(self.channel_info, sample_rate=12000)
-                    self.stream = OpusRadiodStream(
-                        channel=opus_info,
-                        on_samples=self.on_samples,
-                        samples_per_packet=240  # 20ms at 12k
-                    )
-                else:
-                    self.stream = RadiodStream(
-                        channel=self.channel_info,
-                        on_samples=self.on_samples
-                    )
+                # Use S16LERadiodStream for proper int16->float32 decoding
+                self.stream = S16LERadiodStream(
+                    channel=self.channel_info,
+                    on_samples=self.on_samples,
+                    samples_per_packet=240  # 20ms at 12kHz
+                )
                 self.stream.start()
                 self._last_packet_time = time.time()
-                logger.info(f"RobustManagedStream: Started direct stream on SSRC {ssrc:x} -> {data_mcast_addr}:5004")
+                logger.info(f"RobustManagedStream: Started stream on SSRC {self.channel_info.ssrc:x} "
+                            f"at {self.channel_info.multicast_address}:{self.channel_info.port}")
                 return True
         except Exception as e:
-            logger.warning(f"RobustManagedStream direct start failed: {e}")
+            logger.warning(f"RobustManagedStream ensure_channel failed: {e}")
         return False
 
 
@@ -217,18 +211,19 @@ class AudioStreamer:
         self.active_streams = {} # freq_hz -> ManagedStream
         self.listeners = {} # freq_hz -> List[WebSocket]
 
-    async def add_listener(self, freq_hz: float, websocket: WebSocket, control):
-        """Adds a websocket listener for a specific channel's raw audio packets."""
-        if freq_hz not in self.listeners:
-            self.listeners[freq_hz] = []
+    async def add_listener(self, frequency_hz: float, websocket: WebSocket, controller):
+        """Adds a websocket listener for a specific frequency."""
+        freq_key = float(frequency_hz)
+        if freq_key not in self.listeners:
+            self.listeners[freq_key] = []
         
-        self.listeners[freq_hz].append(websocket)
-        logger.info(f"Added listener for frequency {freq_hz}. Total listeners: {len(self.listeners[freq_hz])}")
+        self.listeners[freq_key].append(websocket)
+        logger.info(f"Added listener for frequency {freq_key}. Total listeners: {len(self.listeners[freq_key])}")
         
         # Start a stream if not already running for this frequency
-        if freq_hz not in self.active_streams:
-            if not control:
-                logger.error(f"Cannot stream {freq_hz}: RadiodControl instance missing.")
+        if freq_key not in self.active_streams:
+            if not controller:
+                logger.error(f"Cannot stream {freq_key}: RadiodControl instance missing.")
                 try:
                     await websocket.close(code=1011, reason="Radio control missing")
                 except:
@@ -242,20 +237,21 @@ class AudioStreamer:
                 """Callback invoked by ManagedStream on the background thread"""
                 if loop is None or loop.is_closed():
                     return
-                logger.info(f"Received {len(samples)} samples for freq {freq_hz}")
+                
+                
                 # Convert float32 numpy array to raw bytes to send to frontend
                 payload = samples.tobytes()
-                asyncio.run_coroutine_threadsafe(self.broadcast(freq_hz, payload), loop)
+                asyncio.run_coroutine_threadsafe(self.broadcast(frequency_hz, payload), loop)
 
-            # Auto-healing RobustManagedStream ensures encoding=OPUS
+            # Use S16LE encoding — radiod sends float32 PCM data for this mode
             stream = RobustManagedStream(
-                control=control,
-                frequency_hz=freq_hz,
+                controller=controller,
+                frequency_hz=frequency_hz,
                 preset="nfm",
                 sample_rate=12000,
-                encoding=Encoding.OPUS,
+                encoding=Encoding.S16LE,
                 on_samples=handle_samples,
-                squelch_threshold=getattr(control.parent if hasattr(control, 'parent') else None, 'squelch_threshold', None)
+                squelch_threshold=getattr(controller, 'squelch_threshold', None)
             )
             # Try to get squelch from controller if we can't find it
             if stream.squelch_threshold is None:
@@ -264,8 +260,8 @@ class AudioStreamer:
             # Run start() in a thread to avoid blocking the event loop
             await asyncio.to_thread(stream.start)
             
-            self.active_streams[freq_hz] = stream
-            logger.info(f"Started ManagedStream for {freq_hz} Hz")
+            self.active_streams[frequency_hz] = stream
+            logger.info(f"Started ManagedStream for {frequency_hz} Hz")
 
     async def remove_listener(self, freq_hz: float, websocket: WebSocket):
         """Removes a websocket listener and stops the stream if no listeners left."""

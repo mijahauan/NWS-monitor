@@ -70,6 +70,13 @@ def get_stations_in_range(all_stations: list, lat: float, lon: float, radius_km:
     """Filter stations by distance."""
     results = []
     
+    # Map frequency to channel
+    def get_channel(freq: float):
+        try:
+            return f"CH {NWS_FREQUENCIES.index(freq) + 1}"
+        except ValueError:
+            return "Unknown"
+    
     # If we have real stations, filter them
     for s in all_stations:
         dist = haversine(lat, lon, s["latitude"], s["longitude"])
@@ -78,6 +85,7 @@ def get_stations_in_range(all_stations: list, lat: float, lon: float, radius_km:
             s_copy["distance_km"] = dist
             # Standardize for frontend
             s_copy["Downlink"] = f"{s['frequency']/1e6:.3f}"
+            s_copy["Channel"] = get_channel(s["frequency"])
             s_copy["Callsign"] = s.get("callsign", "NWS")
             s_copy["Lat"] = s["latitude"]
             s_copy["Long"] = s["longitude"]
@@ -91,6 +99,7 @@ def get_stations_in_range(all_stations: list, lat: float, lon: float, radius_km:
                 "Callsign": f"NWS-CH{i+1}",
                 "Downlink": f"{freq/1e6:.3f}",
                 "frequency": freq,
+                "Channel": f"CH {i+1}",
                 "Lat": lat,
                 "Long": lon,
                 "distance_km": 0.0,

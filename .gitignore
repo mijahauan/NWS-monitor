@@ -15,3 +15,6 @@ certs/
 # IDE
 .vscode/
 .idea/
+# PID files
+.app.pid
+test_*.py

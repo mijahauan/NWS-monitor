@@ -16,13 +16,14 @@ Displays NWS transmitter locations on a live map, monitors the 7 standard NWR ch
 
 ## How It Works
 
-The application utilizes a robust audio pipeline aligned to 12kHz, ensuring high-quality, gap-free Opus streaming. It discovers transmitters based on the user's location (Grid Square or Lat/Lon) and allows one-click listening to the live broadcast.
+The application leverages the high-level `ensure_channel` API from `ka9q-python` for deterministic SSRC management and efficient multicast resource sharing. It automatically discovers NWS transmitters based on your location and provides real-time S16LE-based audio streaming (normalized to float32) for clear reception.
 
 ## Architecture
 
-- **Backend**: FastAPI + ka9q-python + Opus (12kHz alignment)
+- **Backend**: FastAPI + ka9q-python (high-level API)
+- **Audio Pipeline**: S16LE decoding with 12kHz alignment + Web Audio playback
+- **Radio**: Connects to `radiod` via mDNS; handles gain and squelch dynamically for close-range stability.
 - **Frontend**: Leaflet Map + Web Audio API
-- **Radio**: Connects to any `radiod` instance via mDNS status channel.
 
 ## Setup & Usage
 

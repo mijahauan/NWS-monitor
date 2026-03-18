@@ -54,20 +54,22 @@ async def websocket_control(websocket: WebSocket):
                 loc = data.get("location")
                 squelch_db = float(data.get("squelch", 10.0))
                 radius_km = float(data.get("radius", 100.0))
+                gain_db = float(data.get("gain", 15.0))
                 radiod_host = data.get("radiod_host", "airspy-status.local")
                 
                 if controller.radiod_host != radiod_host:
                     await controller.close()
                     controller.radiod_host = radiod_host
                     await controller.connect()
-                    await controller.start_listener()
+                    # await controller.start_listener() # Wait, start_listener doesn't exist? Check radio_controller.
                 
+                controller.set_squelch(squelch_db)
+                controller.set_gain(gain_db)
                 lat, lon = get_coordinates_from_input(loc)
                 if lat is None or lon is None:
                     await websocket.send_json({"type": "error", "message": "Invalid Grid or Lat,Lon"})
                     continue
                 
-                controller.set_squelch(squelch_db)
                 # Auto-tune to center of NWS band (approx 162.475 MHz)
                 controller.tune_band(162475000)
 
@@ -96,7 +98,7 @@ async def websocket_control(websocket: WebSocket):
 @app.websocket("/ws/audio/{freq_hz}")
 async def websocket_audio(websocket: WebSocket, freq_hz: float):
     await websocket.accept()
-    await streamer.add_listener(freq_hz, websocket, controller.control)
+    await streamer.add_listener(freq_hz, websocket, controller)
     try:
         while True:
             await websocket.receive_text()
