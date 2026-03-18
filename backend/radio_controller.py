@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 from ka9q import RadiodControl
+from ka9q.discovery import discover_channels
 from ka9q.types import Encoding
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,20 @@ class RadioController:
                 except Exception as e:
                     logger.warning(f"Failed to remove SSRC {ssrc:08x}: {e}")
                 del self.active_channels[ssrc]
+
+        # Scrub orphaned channels at our target frequencies (left by previous
+        # server runs that used a different gain/encoding in the SSRC hash).
+        try:
+            existing = discover_channels(self.radiod_host, listen_duration=1.0)
+            for ssrc, ch in list(existing.items()):
+                if ch.frequency in new_freqs and ssrc not in self.active_channels:
+                    try:
+                        self.control.remove_channel(ssrc)
+                        logger.info(f"Scrubbed orphan SSRC {ssrc:08x} ({ch.frequency/1e6:.3f} MHz)")
+                    except Exception as e:
+                        logger.warning(f"Failed to scrub SSRC {ssrc:08x}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to discover existing channels for scrub: {e}")
 
         # Ensure a channel exists for every requested frequency
         for freq_hz in new_freqs:
