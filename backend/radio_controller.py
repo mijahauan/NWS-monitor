@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Optional
 from ka9q import RadiodControl
 from ka9q.discovery import discover_channels
@@ -14,6 +15,7 @@ class RadioController:
         self.active_channels: dict = {}  # ssrc -> freq_hz
         self.squelch_threshold: float = 10.0
         self.gain_db: float = 15.0
+        self._monitor_lock = threading.Lock()
 
     async def connect(self):
         """Connect to radiod via its status multicast address."""
@@ -41,6 +43,15 @@ class RadioController:
         Ensure radiod channels exist for each repeater frequency.
         Removes channels no longer in the list (freq=0 erase).
         """
+        if not self._monitor_lock.acquire(blocking=False):
+            logger.info("monitor_repeaters: already running, skipping concurrent call")
+            return
+        try:
+            self._monitor_repeaters_locked(repeaters)
+        finally:
+            self._monitor_lock.release()
+
+    def _monitor_repeaters_locked(self, repeaters: list):
         if not self.control:
             logger.warning("monitor_repeaters: no radiod connection")
             return
@@ -73,10 +84,13 @@ class RadioController:
 
         # Scrub orphaned channels at our target frequencies (left by previous
         # server runs that used a different gain/encoding in the SSRC hash).
+        # Use 100 Hz tolerance — radiod may echo back a slightly imprecise float.
+        FREQ_TOL = 100.0
         try:
             existing = discover_channels(self.radiod_host, listen_duration=1.0)
             for ssrc, ch in list(existing.items()):
-                if ch.frequency in new_freqs and ssrc not in self.active_channels:
+                freq_match = any(abs(ch.frequency - f) < FREQ_TOL for f in new_freqs)
+                if freq_match and ssrc not in self.active_channels:
                     try:
                         self.control.remove_channel(ssrc)
                         logger.info(f"Scrubbed orphan SSRC {ssrc:08x} ({ch.frequency/1e6:.3f} MHz)")

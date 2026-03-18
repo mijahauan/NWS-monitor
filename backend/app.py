@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -35,13 +36,23 @@ async def activity_monitor():
             )
             for ssrc, freq_hz in list(controller.active_channels.items()):
                 ch = channels.get(ssrc)
-                snr = ch.snr if ch else float('-inf')
-                is_active = snr > SNR_ACTIVE_THRESHOLD
+                if ch is None:
+                    # SSRC not found; try matching by frequency (100 Hz tolerance)
+                    ch = next(
+                        (c for c in channels.values()
+                         if abs(c.frequency - freq_hz) < 100.0),
+                        None
+                    )
+                raw_snr = ch.snr if ch is not None else None
+                # Treat -inf (no signal computed) as None so UI shows '--'
+                if raw_snr is not None and (math.isinf(raw_snr) or math.isnan(raw_snr)):
+                    raw_snr = None
+                is_active = raw_snr is not None and raw_snr > SNR_ACTIVE_THRESHOLD
                 msg = {
                     "type": "activity",
                     "freq": freq_hz,
                     "isActive": is_active,
-                    "snr": round(snr, 1) if snr != float('-inf') else 0.0,
+                    "snr": round(raw_snr, 1) if raw_snr is not None else None,
                 }
                 for ws in list(active_websockets):
                     try:

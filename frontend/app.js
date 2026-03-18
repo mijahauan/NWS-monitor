@@ -183,17 +183,23 @@ function handleActivityUpdate(data) {
 
         // Numerical SNR label
         if (snrLabel) {
-            const snrText = snr > 0 ? `${snr.toFixed(1)} dB` : `${snr.toFixed(1)} dB`;
-            const color = snr >= 10 ? '#10b981' : snr >= 3 ? '#f59e0b' : '#6b7280';
-            snrLabel.textContent = `SNR: ${snrText}`;
-            snrLabel.style.color = color;
+            if (data.snr !== null && data.snr !== undefined && isFinite(snr)) {
+                const color = snr >= 10 ? '#10b981' : snr >= 3 ? '#f59e0b' : '#6b7280';
+                snrLabel.textContent = `SNR: ${snr.toFixed(1)} dB`;
+                snrLabel.style.color = color;
+            } else {
+                snrLabel.textContent = 'SNR: --';
+                snrLabel.style.color = '#6b7280';
+            }
         }
 
         // Keep marker tooltip current
         marker.unbindTooltip();
-        marker.bindTooltip(`${snr.toFixed(1)} dB SNR`, {
-            permanent: false, direction: 'top', className: 'snr-tooltip'
-        });
+        if (data.snr !== null && data.snr !== undefined && isFinite(snr)) {
+            marker.bindTooltip(`${snr.toFixed(1)} dB SNR`, {
+                permanent: false, direction: 'top', className: 'snr-tooltip'
+            });
+        }
     }
 }
 
