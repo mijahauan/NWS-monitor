@@ -144,6 +144,7 @@ function handleSearchResults(data) {
             </div>
             <div class="rep-details">
                 <span>Dist: ${rep.distance_km.toFixed(1)} km</span>
+                <span class="rep-snr" id="snr-${freqHz}" style="margin-left:auto;font-size:0.75rem;color:#9ca3af;">SNR: --</span>
             </div>
             <div class="signal-meter">
                 <div class="signal-fill" id="sig-${freqHz}"></div>
@@ -164,6 +165,7 @@ function handleActivityUpdate(data) {
 
     const li = document.getElementById(`rep-${freqHz}`);
     const sigFill = document.getElementById(`sig-${freqHz}`);
+    const snrLabel = document.getElementById(`snr-${freqHz}`);
     const marker = markers[freqHz];
 
     if (li && sigFill && marker) {
@@ -175,9 +177,23 @@ function handleActivityUpdate(data) {
             marker.setIcon(defaultIcon);
         }
 
-        // Map SNR to 0-100% (assuming max around 30dB for UI scale)
+        // Map SNR to 0-100% (30 dB = full scale)
         const pct = Math.max(0, Math.min(100, (snr / 30) * 100));
         sigFill.style.width = `${pct}%`;
+
+        // Numerical SNR label
+        if (snrLabel) {
+            const snrText = snr > 0 ? `${snr.toFixed(1)} dB` : `${snr.toFixed(1)} dB`;
+            const color = snr >= 10 ? '#10b981' : snr >= 3 ? '#f59e0b' : '#6b7280';
+            snrLabel.textContent = `SNR: ${snrText}`;
+            snrLabel.style.color = color;
+        }
+
+        // Keep marker tooltip current
+        marker.unbindTooltip();
+        marker.bindTooltip(`${snr.toFixed(1)} dB SNR`, {
+            permanent: false, direction: 'top', className: 'snr-tooltip'
+        });
     }
 }
 

@@ -73,25 +73,37 @@ class RadioController:
         # Ensure a channel exists for every requested frequency
         for freq_hz in new_freqs:
             try:
+                # gain=0.0 keeps the SSRC hash stable — changing the gain
+                # slider would otherwise produce a different SSRC and a
+                # duplicate channel.  Apply actual gain separately below.
                 channel = self.control.ensure_channel(
                     frequency_hz=freq_hz,
                     preset="nfm",
                     sample_rate=12000,
-                    gain=self.gain_db,
-                    encoding=Encoding.F32LE,
+                    gain=0.0,
                     timeout=5.0,
                 )
                 ssrc = channel.ssrc
                 self.active_channels[ssrc] = freq_hz
 
-                # Apply SNR squelch so radiod only streams when signal is present
                 try:
-                    self.control.set_squelch(
-                        ssrc,
-                        enable=True,
-                        open_snr_db=self.squelch_threshold,
-                        close_snr_db=self.squelch_threshold - 3.0,
-                    )
+                    self.control.set_gain(ssrc, self.gain_db)
+                except Exception as e:
+                    logger.warning(f"Failed to set gain on SSRC {ssrc:08x}: {e}")
+
+                # Set F32LE separately (not in ensure_channel — encoding is also
+                # part of the SSRC hash and ManagedStream cannot pass it)
+                try:
+                    self.control.set_output_encoding(ssrc, Encoding.F32LE)
+                except Exception as e:
+                    logger.warning(f"Failed to set F32LE on SSRC {ssrc:08x}: {e}")
+
+                # SNR squelch with impossibly-low threshold = always open.
+                # enable=False cuts output entirely; use -100dB threshold instead.
+                try:
+                    self.control.set_squelch(ssrc, enable=True,
+                                             open_snr_db=-100.0,
+                                             close_snr_db=-200.0)
                 except Exception as sq_err:
                     logger.warning(f"Failed to set squelch on SSRC {ssrc:08x}: {sq_err}")
 

@@ -64,30 +64,25 @@ class AudioStreamer:
                 f"Stream restored for {freq_key/1e6:.3f} MHz: "
                 f"SSRC {channel.ssrc:08x}"
             )
-            # Re-apply F32LE encoding (ManagedStream recreates channel without it)
+            # Re-apply post-creation settings (ManagedStream recreates without them)
+            gain = getattr(controller, 'gain_db', 15.0)
             try:
+                controller.control.set_gain(channel.ssrc, gain)
                 controller.control.set_output_encoding(channel.ssrc, Encoding.F32LE)
+                controller.control.set_squelch(channel.ssrc, enable=True,
+                                               open_snr_db=-100.0,
+                                               close_snr_db=-200.0)
             except Exception as e:
-                logger.warning(f"Failed to re-apply F32LE encoding after restore: {e}")
-            # Re-apply squelch after radiod restart (channel was recreated)
-            squelch = getattr(controller, 'squelch_threshold', None)
-            if squelch is not None:
-                try:
-                    controller.control.set_squelch(
-                        channel.ssrc,
-                        enable=True,
-                        open_snr_db=squelch,
-                        close_snr_db=squelch - 3.0,
-                    )
-                except Exception as sq_err:
-                    logger.warning(f"Failed to re-apply squelch after restore: {sq_err}")
+                logger.warning(f"Failed to re-apply settings after restore: {e}")
 
+        # gain=0.0 keeps the SSRC hash identical to monitor_repeaters so both
+        # share the same radiod channel.  Actual gain is applied after start.
         stream = ManagedStream(
             control=controller.control,
             frequency_hz=freq_key,
             preset="nfm",
             sample_rate=12000,
-            gain=getattr(controller, 'gain_db', 15.0),
+            gain=0.0,
             on_samples=on_samples,
             on_stream_dropped=on_dropped,
             on_stream_restored=on_restored,
@@ -98,14 +93,17 @@ class AudioStreamer:
 
         try:
             await asyncio.to_thread(stream.start)
-            # ManagedStream has no encoding param; force F32LE so RadiodStream
-            # _parse_samples receives float32 (not the default S16LE)
+            gain = getattr(controller, 'gain_db', 15.0)
             try:
+                controller.control.set_gain(stream.channel.ssrc, gain)
                 controller.control.set_output_encoding(
                     stream.channel.ssrc, Encoding.F32LE
                 )
+                controller.control.set_squelch(stream.channel.ssrc, enable=True,
+                                               open_snr_db=-100.0,
+                                               close_snr_db=-200.0)
             except Exception as e:
-                logger.warning(f"Failed to set F32LE encoding for {freq_key/1e6:.3f} MHz: {e}")
+                logger.warning(f"Failed to configure stream for {freq_key/1e6:.3f} MHz: {e}")
             self.active_streams[freq_key] = stream
             logger.info(f"ManagedStream started for {freq_key/1e6:.3f} MHz")
         except Exception as e:
