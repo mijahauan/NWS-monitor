@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 from ka9q import RadiodControl
+from ka9q.types import Encoding
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class RadioController:
                     preset="nfm",
                     sample_rate=12000,
                     gain=self.gain_db,
+                    encoding=Encoding.F32LE,
                     timeout=5.0,
                 )
                 ssrc = channel.ssrc

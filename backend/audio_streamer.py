@@ -4,6 +4,7 @@ import numpy as np
 from typing import Dict, List, Optional
 from fastapi import WebSocket
 from ka9q import ManagedStream, StreamQuality
+from ka9q.types import Encoding
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ class AudioStreamer:
                 f"Stream restored for {freq_key/1e6:.3f} MHz: "
                 f"SSRC {channel.ssrc:08x}"
             )
+            # Re-apply F32LE encoding (ManagedStream recreates channel without it)
+            try:
+                controller.control.set_output_encoding(channel.ssrc, Encoding.F32LE)
+            except Exception as e:
+                logger.warning(f"Failed to re-apply F32LE encoding after restore: {e}")
             # Re-apply squelch after radiod restart (channel was recreated)
             squelch = getattr(controller, 'squelch_threshold', None)
             if squelch is not None:
@@ -92,6 +98,14 @@ class AudioStreamer:
 
         try:
             await asyncio.to_thread(stream.start)
+            # ManagedStream has no encoding param; force F32LE so RadiodStream
+            # _parse_samples receives float32 (not the default S16LE)
+            try:
+                controller.control.set_output_encoding(
+                    stream.channel.ssrc, Encoding.F32LE
+                )
+            except Exception as e:
+                logger.warning(f"Failed to set F32LE encoding for {freq_key/1e6:.3f} MHz: {e}")
             self.active_streams[freq_key] = stream
             logger.info(f"ManagedStream started for {freq_key/1e6:.3f} MHz")
         except Exception as e:

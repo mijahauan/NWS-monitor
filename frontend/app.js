@@ -184,6 +184,9 @@ function handleActivityUpdate(data) {
 let audioCtx = null;
 let nextAudioTime = 0;
 
+const AUDIO_TARGET_LATENCY = 0.15;  // 150 ms: reset anchor when late
+const AUDIO_MAX_LATENCY    = 0.40;  // 400 ms: drop frame when too far ahead
+
 function initAudio() {
     if (!audioCtx) {
         // Remove forced sampleRate as it can cause issues on Safari/macOS
@@ -233,23 +236,27 @@ function listenToRepeater(freqHz, callsign, freq) {
             console.log(`Received 100 audio frames. Buffer state: ${audioCtx.state}`);
         }
 
-        // Data is sent as np.float32 array bytes from backend Opus decoder
         const floats = new Float32Array(event.data);
-        if (floats.length === 0) {
-            console.log("Empty audio frame");
+        if (floats.length === 0) return;
+
+        if (frameCount % 100 === 0) {
+            let rms = 0;
+            for (let i = 0; i < floats.length; i++) rms += floats[i] * floats[i];
+            console.log(`Audio RMS: ${Math.sqrt(rms / floats.length).toFixed(4)}`);
+        }
+
+        const now = audioCtx.currentTime;
+
+        // Late: scheduler fell behind real time — re-anchor with target latency
+        if (nextAudioTime < now) {
+            nextAudioTime = now + AUDIO_TARGET_LATENCY;
+        }
+
+        // Too far ahead: drop this frame to drain the burst backlog
+        if (nextAudioTime - now > AUDIO_MAX_LATENCY) {
             return;
         }
 
-        let rms = 0;
-        for (let i = 0; i < floats.length; i++) {
-            rms += floats[i] * floats[i];
-        }
-        rms = Math.sqrt(rms / floats.length);
-        if (frameCount % 100 === 0) {
-            console.log(`Audio RMS: ${rms.toFixed(4)}`);
-        }
-
-        // All streams are now aligned to 12000Hz (Opus and S16LE)
         const rate = 12000;
         const buffer = audioCtx.createBuffer(1, floats.length, rate);
         buffer.copyToChannel(floats, 0);
@@ -257,19 +264,6 @@ function listenToRepeater(freqHz, callsign, freq) {
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;
         source.connect(audioCtx.destination);
-
-        // Schedule playback smoothly
-        const drift = nextAudioTime - audioCtx.currentTime;
-        if (nextAudioTime < audioCtx.currentTime) {
-            if (drift < -0.1) {
-                console.warn(`Audio drift detected (late): ${drift.toFixed(3)}s. Resetting.`);
-            }
-            nextAudioTime = audioCtx.currentTime + 0.05; // 50ms buffer
-        } else if (drift > 1.0) {
-            console.warn(`Audio drift detected (early): ${drift.toFixed(3)}s. Resetting.`);
-            nextAudioTime = audioCtx.currentTime + 0.05;
-        }
-
         source.start(nextAudioTime);
         nextAudioTime += buffer.duration;
     };
