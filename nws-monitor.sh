@@ -4,12 +4,12 @@
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE="$APP_DIR/.app.pid"
 LOGFILE="$APP_DIR/backend.log"
-# Reuse the venv from the original project if it exists
-VENV="/home/mjh/git/repeater-monitor/venv"
+VENV="$APP_DIR/venv"
 
 if [ ! -d "$VENV" ]; then
-    echo "Warning: Virtual environment at $VENV not found. Falling back to local 'venv'..."
-    VENV="$APP_DIR/venv"
+    echo "Error: Virtual environment not found at $VENV"
+    echo "Run: python3 -m venv venv && venv/bin/pip install -e /path/to/ka9q-python && venv/bin/pip install -e ."
+    exit 1
 fi
 
 start() {

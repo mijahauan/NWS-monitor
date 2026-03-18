@@ -1,16 +1,16 @@
 [project]
-name = "repeater-monitor"
+name = "nws-monitor"
 version = "0.1.0"
-description = "A web application to visualize and listen to local ham radio repeaters using ka9q-radio."
+description = "NOAA Weather Radio monitor using ka9q-radio"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi",
-    "uvicorn",
+    "uvicorn[standard]",
     "websockets",
     "maidenhead",
     "httpx",
-    "ka9q-python",
-    "numpy"
+    "numpy>=1.24.0",
+    "ka9q-python>=3.4.2",
 ]
 
 [tool.setuptools]

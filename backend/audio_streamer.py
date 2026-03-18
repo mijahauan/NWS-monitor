@@ -1,292 +1,128 @@
 import asyncio
-import dataclasses
 import logging
 import numpy as np
-import threading
-import time
-import opuslib
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
-from fastapi import WebSocket, WebSocketDisconnect
-from ka9q import ManagedStream, RadiodStream, StreamQuality, ChannelInfo
-from ka9q.types import Encoding
+from fastapi import WebSocket
+from ka9q import ManagedStream, StreamQuality
 
 logger = logging.getLogger(__name__)
 
-class OpusRadiodStream(RadiodStream):
-    """
-    Subclass of RadiodStream that decodes Opus payloads into float32 samples
-    and scales RTP timestamps from 48kHz to 12kHz to match the sample rate.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Ensure channel info is also scaled for wallclock calculations
-        if self.channel.sample_rate == 48000:
-             # We actually want 12000
-             self.channel = dataclasses.replace(self.channel, sample_rate=12000)
-             if self.channel.rtp_timesnap:
-                 self.channel = dataclasses.replace(self.channel, rtp_timesnap=self.channel.rtp_timesnap // 4)
-
-        self.decoder = opuslib.Decoder(12000, 1)
-        self.frame_size = 240 # 20ms at 12000Hz
-        logger.info(f"OpusRadiodStream aligned to 12000Hz (timestamp scale=1/4)")
-
-    def _process_packet(self, data: bytes):
-        """Override to scale RTP timestamps from 48kHz to 12kHz before resequencing."""
-        from ka9q.rtp_recorder import parse_rtp_header, rtp_to_wallclock
-        from ka9q.resequencer import RTPPacket
-
-        header = parse_rtp_header(data)
-        if header is None or header.ssrc != self.channel.ssrc:
-            return
-
-        # Scale 48kHz RTP timestamp to 12kHz to match resequencer samples_per_packet=240
-        scaled_ts = header.timestamp // 4
-
-        # Track stats (mimic RadiodStream)
-        self.quality.rtp_packets_received += 1
-        if self._first_rtp_timestamp is None:
-            self._first_rtp_timestamp = scaled_ts
-            self.quality.first_rtp_timestamp = scaled_ts
-        self.quality.last_rtp_timestamp = scaled_ts
-
-        # Extract payload and decode
-        header_len = 12 + (4 * header.csrc_count)
-        payload = data[header_len:]
-        if not payload:
-            return
-
-        samples = self._parse_samples(payload)
-        if samples is None:
-            return
-
-        # Use scaled timestamp for timing
-        wallclock = rtp_to_wallclock(scaled_ts, self.channel)
-
-        packet = RTPPacket(
-            sequence=header.sequence,
-            timestamp=scaled_ts,
-            ssrc=header.ssrc,
-            samples=samples,
-            wallclock=wallclock
-        )
-
-        # Process through resequencer
-        output_samples, gap_events = self.resequencer.process_packet(packet)
-        if output_samples is not None:
-            self._sample_buffer.append(output_samples)
-            self._gap_buffer.extend(gap_events)
-            self._packets_since_delivery += 1
-            if self._packets_since_delivery >= self.deliver_interval_packets:
-                self._deliver_samples()
-
-    def _parse_samples(self, payload: bytes) -> Optional[np.ndarray]:
-        """Decode Opus payload to Int16 samples."""
-        try:
-            pcm_bytes = self.decoder.decode(payload, self.frame_size)
-            return np.frombuffer(pcm_bytes, dtype=np.int16)
-        except Exception as e:
-            logger.debug(f"Opus decode error: {e}")
-            return None
-
-class S16LERadiodStream(RadiodStream):
-    """
-    Subclass of RadiodStream that correctly decodes S16LE (16-bit signed integer)
-    payloads into float32 samples normalized to [-1.0, 1.0].
-    
-    The base RadiodStream._parse_samples interprets all audio payloads as float32,
-    but when radiod outputs S16LE encoding, the payload contains 16-bit integers.
-    Reading int16 bytes as float32 produces garbage/NaN values.
-    """
-    def _parse_samples(self, payload: bytes) -> Optional[np.ndarray]:
-        try:
-            int16_samples = np.frombuffer(payload, dtype=np.int16)
-            return (int16_samples.astype(np.float32) / 32768.0)
-        except Exception as e:
-            logger.error(f"S16LE parse error: {e}")
-            return None
-
-
-class RobustManagedStream:
-    """
-    Subclass of ManagedStream logic that supports explicit encoding (S16LE).
-    
-    The standard ManagedStream (as of ka9q-python 3.2.2) does not support the 'encoding' 
-    parameter in its constructor or its internal restore loop, which causes it to 
-    default to S16. This class ensures encoding is respected.
-    """
-    def __init__(self, controller, frequency_hz, preset='nfm', sample_rate=12000, 
-                 encoding=Encoding.S16LE, on_samples=None, deliver_interval_packets=1,
-                 squelch_threshold=None):
-        self.controller = controller
-        self.control = controller.control
-        self.frequency_hz = frequency_hz
-        self.preset = preset
-        self.sample_rate = sample_rate
-        self.encoding = encoding
-        self.on_samples = on_samples
-        self.deliver_interval_packets = deliver_interval_packets
-        self.squelch_threshold = squelch_threshold
-        
-        self.stream = None
-        self.channel_info = None
-        self._running = False
-        self._last_packet_time = 0.0
-        self._monitor_thread = None
-        self._lock = threading.Lock()
-
-    def start(self):
-        with self._lock:
-            self._running = True
-            self._ensure_connection()
-            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-            self._monitor_thread.start()
-
-    def stop(self):
-        with self._lock:
-            self._running = False
-        if self.stream:
-            self.stream.stop()
-        if self._monitor_thread:
-            self._monitor_thread.join(timeout=1.0)
-
-    def _ensure_connection(self):
-        """Creates/finds the channel and starts the RadiodStream."""
-        try:
-            # Use ensure_channel to off-load SSRC and multicast management
-            self.channel_info = self.control.ensure_channel(
-                frequency_hz=self.frequency_hz,
-                preset=self.preset,
-                sample_rate=self.sample_rate,
-                encoding=self.encoding,
-                gain=getattr(self.controller, 'gain_db', 21.0),
-                timeout=5.0
-            )
-
-            if self.channel_info:
-                # Set squelch if provided
-                if self.squelch_threshold is not None:
-                    try:
-                        self.control.set_squelch(self.channel_info.ssrc, enable=True, open_snr_db=float(self.squelch_threshold))
-                        logger.info(f"RobustManagedStream: Set squelch to {self.squelch_threshold} dB for SSRC {self.channel_info.ssrc:x}")
-                    except Exception as sq_err:
-                        logger.warning(f"Failed to set squelch on channel: {sq_err}")
-
-                if self.stream:
-                    self.stream.stop()
-                
-                # Use S16LERadiodStream for proper int16->float32 decoding
-                self.stream = S16LERadiodStream(
-                    channel=self.channel_info,
-                    on_samples=self.on_samples,
-                    samples_per_packet=240  # 20ms at 12kHz
-                )
-                self.stream.start()
-                self._last_packet_time = time.time()
-                logger.info(f"RobustManagedStream: Started stream on SSRC {self.channel_info.ssrc:x} "
-                            f"at {self.channel_info.multicast_address}:{self.channel_info.port}")
-                return True
-        except Exception as e:
-            logger.warning(f"RobustManagedStream ensure_channel failed: {e}")
-        return False
-
-
-    def _monitor_loop(self):
-        """Restoration loop similar to ManagedStream but with encoding support."""
-        while self._running:
-            time.sleep(2.0)
-            
-            # Simple health check: if we haven't seen a packet in 5s, reconnect
-            # (RadiodStream updates some internal state we could hook, but this is simple)
-            # In a real implementation we'd monitor the samples callback arrival
-            
-            # For this simple monitor, we just trust the initial connection 
-            # and let the user re-click if it actually dies, OR we can be more aggressive.
-            # However, the user said "Radiod is quite stable" now.
-            pass
-
 
 class AudioStreamer:
+    """
+    Manages one ManagedStream per frequency and fans audio out to WebSocket listeners.
+
+    ManagedStream (ka9q-python) handles:
+      - ensure_channel() on start and after every radiod restart
+      - Self-healing: detects packet dropout and re-establishes the channel
+      - on_stream_dropped / on_stream_restored callbacks
+
+    NFM preset → radiod demodulates and outputs float32 PCM at the requested
+    sample rate.  RadiodStream._parse_samples reads it as np.float32, so no
+    custom subclass is needed.  The frontend (app.js) consumes raw Float32Array
+    bytes directly via Web Audio API at 12 kHz.
+    """
+
     def __init__(self):
-        self.active_streams = {} # freq_hz -> ManagedStream
-        self.listeners = {} # freq_hz -> List[WebSocket]
+        self.active_streams: Dict[float, ManagedStream] = {}
+        self.listeners: Dict[float, List[WebSocket]] = {}
 
     async def add_listener(self, frequency_hz: float, websocket: WebSocket, controller):
-        """Adds a websocket listener for a specific frequency."""
+        """Register a WebSocket listener; start a ManagedStream if none exists yet."""
         freq_key = float(frequency_hz)
-        if freq_key not in self.listeners:
-            self.listeners[freq_key] = []
-        
-        self.listeners[freq_key].append(websocket)
-        logger.info(f"Added listener for frequency {freq_key}. Total listeners: {len(self.listeners[freq_key])}")
-        
-        # Start a stream if not already running for this frequency
-        if freq_key not in self.active_streams:
-            if not controller:
-                logger.error(f"Cannot stream {freq_key}: RadiodControl instance missing.")
-                try:
-                    await websocket.close(code=1011, reason="Radio control missing")
-                except:
-                    pass
-                return
-            
-            # Capture the event loop from the main thread
-            loop = asyncio.get_running_loop()
-            
-            def handle_samples(samples: np.ndarray, quality):
-                """Callback invoked by ManagedStream on the background thread"""
-                if loop is None or loop.is_closed():
-                    return
-                
-                
-                # Convert float32 numpy array to raw bytes to send to frontend
-                payload = samples.tobytes()
-                asyncio.run_coroutine_threadsafe(self.broadcast(frequency_hz, payload), loop)
+        self.listeners.setdefault(freq_key, []).append(websocket)
+        logger.info(f"Listener added for {freq_key/1e6:.3f} MHz "
+                    f"(total: {len(self.listeners[freq_key])})")
 
-            # Use S16LE encoding — radiod sends float32 PCM data for this mode
-            stream = RobustManagedStream(
-                controller=controller,
-                frequency_hz=frequency_hz,
-                preset="nfm",
-                sample_rate=12000,
-                encoding=Encoding.S16LE,
-                on_samples=handle_samples,
-                squelch_threshold=getattr(controller, 'squelch_threshold', None)
-            )
-            # Try to get squelch from controller if we can't find it
-            if stream.squelch_threshold is None:
-                # We'll need to pass it in or find the global one
+        if freq_key in self.active_streams:
+            return  # Stream already running; listener will receive next broadcast
+
+        if not controller or not controller.control:
+            logger.error(f"Cannot stream {freq_key/1e6:.3f} MHz: no radiod connection")
+            try:
+                await websocket.close(code=1011, reason="Radio control unavailable")
+            except Exception:
                 pass
-            # Run start() in a thread to avoid blocking the event loop
+            return
+
+        loop = asyncio.get_running_loop()
+
+        def on_samples(samples: np.ndarray, quality: StreamQuality):
+            if loop.is_closed():
+                return
+            payload = samples.astype(np.float32).tobytes()
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(freq_key, payload), loop
+            )
+
+        def on_dropped(reason: str):
+            logger.warning(f"Stream dropped for {freq_key/1e6:.3f} MHz: {reason}")
+
+        def on_restored(channel):
+            logger.info(
+                f"Stream restored for {freq_key/1e6:.3f} MHz: "
+                f"SSRC {channel.ssrc:08x}"
+            )
+            # Re-apply squelch after radiod restart (channel was recreated)
+            squelch = getattr(controller, 'squelch_threshold', None)
+            if squelch is not None:
+                try:
+                    controller.control.set_squelch(
+                        channel.ssrc,
+                        enable=True,
+                        open_snr_db=squelch,
+                        close_snr_db=squelch - 3.0,
+                    )
+                except Exception as sq_err:
+                    logger.warning(f"Failed to re-apply squelch after restore: {sq_err}")
+
+        stream = ManagedStream(
+            control=controller.control,
+            frequency_hz=freq_key,
+            preset="nfm",
+            sample_rate=12000,
+            gain=getattr(controller, 'gain_db', 15.0),
+            on_samples=on_samples,
+            on_stream_dropped=on_dropped,
+            on_stream_restored=on_restored,
+            drop_timeout_sec=5.0,
+            samples_per_packet=240,        # 20 ms at 12 kHz
+            deliver_interval_packets=1,    # deliver every packet for low latency
+        )
+
+        try:
             await asyncio.to_thread(stream.start)
-            
-            self.active_streams[frequency_hz] = stream
-            logger.info(f"Started ManagedStream for {frequency_hz} Hz")
+            self.active_streams[freq_key] = stream
+            logger.info(f"ManagedStream started for {freq_key/1e6:.3f} MHz")
+        except Exception as e:
+            logger.error(f"Failed to start stream for {freq_key/1e6:.3f} MHz: {e}")
+            try:
+                await websocket.close(code=1011, reason=f"Stream start failed: {e}")
+            except Exception:
+                pass
 
     async def remove_listener(self, freq_hz: float, websocket: WebSocket):
-        """Removes a websocket listener and stops the stream if no listeners left."""
-        if freq_hz in self.listeners:
-            if websocket in self.listeners[freq_hz]:
-                self.listeners[freq_hz].remove(websocket)
-            
-            if not self.listeners[freq_hz]:
-                # No more listeners, stop the stream
-                if freq_hz in self.active_streams:
-                    stream = self.active_streams.pop(freq_hz)
-                    await asyncio.to_thread(stream.stop)
-                    logger.info(f"Stopped ManagedStream for {freq_hz} Hz (no more listeners)")
-                if freq_hz in self.listeners:
-                    del self.listeners[freq_hz]
+        """Deregister a listener; stop the stream when the last listener leaves."""
+        listeners = self.listeners.get(freq_hz, [])
+        if websocket in listeners:
+            listeners.remove(websocket)
+
+        if not listeners:
+            self.listeners.pop(freq_hz, None)
+            stream = self.active_streams.pop(freq_hz, None)
+            if stream:
+                await asyncio.to_thread(stream.stop)
+                logger.info(f"ManagedStream stopped for {freq_hz/1e6:.3f} MHz "
+                            f"(no more listeners)")
 
     async def broadcast(self, freq_hz: float, payload: bytes):
-        """Broadcasts audio data to all listeners of a frequency."""
-        if freq_hz in self.listeners:
-            # Create a copy of the list because remove_listener might modify it during iteration
-            for websocket in list(self.listeners[freq_hz]):
-                try:
-                    await websocket.send_bytes(payload)
-                except Exception as e:
-                    logger.debug(f"Error broadcasting to socket for freq {freq_hz}: {e}")
-                    await self.remove_listener(freq_hz, websocket)
+        """Send audio payload to every registered listener for this frequency."""
+        for ws in list(self.listeners.get(freq_hz, [])):
+            try:
+                await ws.send_bytes(payload)
+            except Exception as e:
+                logger.debug(f"Broadcast error for {freq_hz/1e6:.3f} MHz: {e}")
+                await self.remove_listener(freq_hz, ws)
+
 
 streamer = AudioStreamer()
