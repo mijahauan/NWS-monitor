@@ -73,8 +73,7 @@ def run(host: str, freq_hz: float, duration: float, out_path: str):
         try:
             control.set_gain(stream.channel.ssrc, GAIN_DB)
             control.set_output_encoding(stream.channel.ssrc, Encoding.F32LE)
-            control.set_squelch(stream.channel.ssrc,
-                                enable=True, open_snr_db=-100.0, close_snr_db=-200.0)
+            control.set_squelch(stream.channel.ssrc, snr_squelch=False)
             print(f"  SSRC {stream.channel.ssrc:08x}  gain={GAIN_DB}dB  F32LE  squelch=open")
         except Exception as e:
             print(f"  Warning: post-start config failed: {e}")

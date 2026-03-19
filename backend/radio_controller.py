@@ -127,14 +127,10 @@ class RadioController:
                 except Exception as e:
                     logger.warning(f"Failed to set F32LE on SSRC {ssrc:08x}: {e}")
 
-                # SNR squelch with impossibly-low threshold = always open.
-                # enable=False cuts output entirely; use -100dB threshold instead.
                 try:
-                    self.control.set_squelch(ssrc, enable=True,
-                                             open_snr_db=-100.0,
-                                             close_snr_db=-200.0)
+                    self.control.set_squelch(ssrc, snr_squelch=False)
                 except Exception as sq_err:
-                    logger.warning(f"Failed to set squelch on SSRC {ssrc:08x}: {sq_err}")
+                    logger.warning(f"Failed to disable squelch on SSRC {ssrc:08x}: {sq_err}")
 
                 logger.info(
                     f"Channel SSRC {ssrc:08x} ready: {freq_hz/1e6:.3f} MHz → "

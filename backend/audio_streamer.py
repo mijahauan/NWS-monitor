@@ -69,9 +69,7 @@ class AudioStreamer:
             try:
                 controller.control.set_gain(channel.ssrc, gain)
                 controller.control.set_output_encoding(channel.ssrc, Encoding.F32LE)
-                controller.control.set_squelch(channel.ssrc, enable=True,
-                                               open_snr_db=-100.0,
-                                               close_snr_db=-200.0)
+                controller.control.set_squelch(channel.ssrc, snr_squelch=False)
             except Exception as e:
                 logger.warning(f"Failed to re-apply settings after restore: {e}")
 
@@ -99,9 +97,7 @@ class AudioStreamer:
                 controller.control.set_output_encoding(
                     stream.channel.ssrc, Encoding.F32LE
                 )
-                controller.control.set_squelch(stream.channel.ssrc, enable=True,
-                                               open_snr_db=-100.0,
-                                               close_snr_db=-200.0)
+                controller.control.set_squelch(stream.channel.ssrc, snr_squelch=False)
             except Exception as e:
                 logger.warning(f"Failed to configure stream for {freq_key/1e6:.3f} MHz: {e}")
             self.active_streams[freq_key] = stream
