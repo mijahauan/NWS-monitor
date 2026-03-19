@@ -64,25 +64,27 @@ class AudioStreamer:
                 f"Stream restored for {freq_key/1e6:.3f} MHz: "
                 f"SSRC {channel.ssrc:08x}"
             )
-            # Re-apply post-creation settings (ManagedStream recreates without them)
+            # Re-apply variable post-creation settings (encoding is stable in hash)
             gain = getattr(controller, 'gain_db', 15.0)
             sq = getattr(controller, 'squelch_threshold', -20.0)
             try:
                 controller.control.set_gain(channel.ssrc, gain)
-                controller.control.set_output_encoding(channel.ssrc, Encoding.F32LE)
                 controller.control.set_squelch(channel.ssrc,
                     open_threshold=sq, close_threshold=sq - 2.0, snr_squelch=True)
             except Exception as e:
                 logger.warning(f"Failed to re-apply settings after restore: {e}")
 
-        # gain=0.0 keeps the SSRC hash identical to monitor_repeaters so both
-        # share the same radiod channel.  Actual gain is applied after start.
+        dest = getattr(controller, 'destination', None)
+        # destination + encoding + gain=0.0 must match radio_controller exactly
+        # so ManagedStream finds the same stable SSRC.
         stream = ManagedStream(
             control=controller.control,
             frequency_hz=freq_key,
             preset="nfm",
             sample_rate=12000,
             gain=0.0,
+            destination=dest,
+            encoding=Encoding.F32LE,
             on_samples=on_samples,
             on_stream_dropped=on_dropped,
             on_stream_restored=on_restored,
@@ -94,12 +96,9 @@ class AudioStreamer:
         try:
             await asyncio.to_thread(stream.start)
             gain = getattr(controller, 'gain_db', 15.0)
+            sq = getattr(controller, 'squelch_threshold', -20.0)
             try:
                 controller.control.set_gain(stream.channel.ssrc, gain)
-                controller.control.set_output_encoding(
-                    stream.channel.ssrc, Encoding.F32LE
-                )
-                sq = getattr(controller, 'squelch_threshold', -20.0)
                 controller.control.set_squelch(stream.channel.ssrc,
                     open_threshold=sq, close_threshold=sq - 2.0, snr_squelch=True)
             except Exception as e:

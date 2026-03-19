@@ -1,8 +1,6 @@
 import logging
-import threading
 from typing import Optional
-from ka9q import RadiodControl
-from ka9q.discovery import discover_channels
+from ka9q import RadiodControl, generate_multicast_ip
 from ka9q.types import Encoding
 
 logger = logging.getLogger(__name__)
@@ -15,7 +13,9 @@ class RadioController:
         self.active_channels: dict = {}  # ssrc -> freq_hz
         self.squelch_threshold: float = -20.0  # matches HTML slider min (always-open default)
         self.gain_db: float = 15.0
-        self._monitor_lock = threading.Lock()
+        # Stable, app-specific multicast destination — scopes all channels to
+        # this app and makes the SSRC deterministic across server restarts.
+        self.destination: str = generate_multicast_ip("nws-monitor")
 
     async def connect(self):
         """Connect to radiod via its status multicast address."""
@@ -51,17 +51,13 @@ class RadioController:
     def monitor_repeaters(self, repeaters: list):
         """
         Ensure radiod channels exist for each repeater frequency.
-        Removes channels no longer in the list (freq=0 erase).
-        """
-        if not self._monitor_lock.acquire(blocking=False):
-            logger.info("monitor_repeaters: already running, skipping concurrent call")
-            return
-        try:
-            self._monitor_repeaters_locked(repeaters)
-        finally:
-            self._monitor_lock.release()
+        Removes channels no longer in the list.
 
-    def _monitor_repeaters_locked(self, repeaters: list):
+        Channel identity = (freq, preset, sample_rate, encoding, destination)
+        with gain=0.0 (canonical).  All four parameters are included in the
+        SSRC hash, so the SSRC is deterministic across server restarts — no
+        orphan scrubbing is needed.
+        """
         if not self.control:
             logger.warning("monitor_repeaters: no radiod connection")
             return
@@ -80,9 +76,9 @@ class RadioController:
                 logger.error(f"Error parsing repeater frequency: {e}")
 
         logger.info(f"Monitoring {len(new_freqs)} frequencies: "
-                    f"{sorted(f/1e6 for f in new_freqs)} MHz")
+                    f"{sorted(f/1e6 for f in new_freqs)} MHz  dest={self.destination}")
 
-        # Remove channels no longer needed (erase via freq=0)
+        # Remove channels no longer needed
         for ssrc, freq_hz in list(self.active_channels.items()):
             if freq_hz not in new_freqs:
                 try:
@@ -92,34 +88,19 @@ class RadioController:
                     logger.warning(f"Failed to remove SSRC {ssrc:08x}: {e}")
                 del self.active_channels[ssrc]
 
-        # Scrub orphaned channels at our target frequencies (left by previous
-        # server runs that used a different gain/encoding in the SSRC hash).
-        # Use 100 Hz tolerance — radiod may echo back a slightly imprecise float.
-        FREQ_TOL = 100.0
-        try:
-            existing = discover_channels(self.radiod_host, listen_duration=1.0)
-            for ssrc, ch in list(existing.items()):
-                freq_match = any(abs(ch.frequency - f) < FREQ_TOL for f in new_freqs)
-                if freq_match and ssrc not in self.active_channels:
-                    try:
-                        self.control.remove_channel(ssrc)
-                        logger.info(f"Scrubbed orphan SSRC {ssrc:08x} ({ch.frequency/1e6:.3f} MHz)")
-                    except Exception as e:
-                        logger.warning(f"Failed to scrub SSRC {ssrc:08x}: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to discover existing channels for scrub: {e}")
-
-        # Ensure a channel exists for every requested frequency
+        # Ensure a channel exists for every requested frequency.
+        # destination + encoding + gain=0.0 → stable SSRC; ensure_channel
+        # finds and reuses the existing channel if it was created in a
+        # previous run with the same parameters.
         for freq_hz in new_freqs:
             try:
-                # gain=0.0 keeps the SSRC hash stable — changing the gain
-                # slider would otherwise produce a different SSRC and a
-                # duplicate channel.  Apply actual gain separately below.
                 channel = self.control.ensure_channel(
                     frequency_hz=freq_hz,
                     preset="nfm",
                     sample_rate=12000,
                     gain=0.0,
+                    destination=self.destination,
+                    encoding=Encoding.F32LE,
                     timeout=5.0,
                 )
                 ssrc = channel.ssrc
@@ -129,13 +110,6 @@ class RadioController:
                     self.control.set_gain(ssrc, self.gain_db)
                 except Exception as e:
                     logger.warning(f"Failed to set gain on SSRC {ssrc:08x}: {e}")
-
-                # Set F32LE separately (not in ensure_channel — encoding is also
-                # part of the SSRC hash and ManagedStream cannot pass it)
-                try:
-                    self.control.set_output_encoding(ssrc, Encoding.F32LE)
-                except Exception as e:
-                    logger.warning(f"Failed to set F32LE on SSRC {ssrc:08x}: {e}")
 
                 try:
                     self.control.set_squelch(ssrc,
