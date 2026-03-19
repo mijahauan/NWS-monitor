@@ -13,7 +13,7 @@ class RadioController:
         self.radiod_host = radiod_host
         self.control: Optional[RadiodControl] = None
         self.active_channels: dict = {}  # ssrc -> freq_hz
-        self.squelch_threshold: float = 10.0
+        self.squelch_threshold: float = -20.0  # matches HTML slider min (always-open default)
         self.gain_db: float = 15.0
         self._monitor_lock = threading.Lock()
 
@@ -33,6 +33,16 @@ class RadioController:
     def set_squelch(self, threshold_db: float):
         self.squelch_threshold = threshold_db
         logger.info(f"Squelch threshold set to {self.squelch_threshold} dB")
+        if not self.control:
+            return
+        for ssrc in list(self.active_channels):
+            try:
+                self.control.set_squelch(ssrc,
+                    open_threshold=threshold_db,
+                    close_threshold=threshold_db - 2.0,
+                    snr_squelch=True)
+            except Exception as e:
+                logger.warning(f"Failed to update squelch on SSRC {ssrc:08x}: {e}")
 
     def tune_band(self, center_freq_hz: float):
         """No-op: NWS channels self-tune via ensure_channel."""
@@ -128,9 +138,12 @@ class RadioController:
                     logger.warning(f"Failed to set F32LE on SSRC {ssrc:08x}: {e}")
 
                 try:
-                    self.control.set_squelch(ssrc, snr_squelch=False)
+                    self.control.set_squelch(ssrc,
+                        open_threshold=self.squelch_threshold,
+                        close_threshold=self.squelch_threshold - 2.0,
+                        snr_squelch=True)
                 except Exception as sq_err:
-                    logger.warning(f"Failed to disable squelch on SSRC {ssrc:08x}: {sq_err}")
+                    logger.warning(f"Failed to set squelch on SSRC {ssrc:08x}: {sq_err}")
 
                 logger.info(
                     f"Channel SSRC {ssrc:08x} ready: {freq_hz/1e6:.3f} MHz → "
